@@ -42,7 +42,7 @@ def auto_click():
 
                 click_count += 1
                 last_main_click_minute = minute
-                ready_for_extra_click = True  # يسمح بالضغط عند 30s فقط لو حصل كليك أساسي
+                ready_for_extra_click = False  # يسمح بالضغط عند 30s فقط لو حصل كليك أساسي
                 print(f"✅ #{click_count:03} | Clicked on 🖥 {screen} at {last_clicked_position} | 🕒 {current_time.strftime('%H:%M:%S')}")
                 print("-" * 60)
                 time.sleep(1.1)

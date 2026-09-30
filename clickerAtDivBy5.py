@@ -2,7 +2,25 @@ import pyautogui  # type: ignore
 import time
 from datetime import datetime, timedelta
 import pytz  # type: ignore
-import winsound
+
+try:
+    import winsound
+except ImportError:  # macOS / Linux: no winsound
+    winsound = None
+
+
+def _beep(freq=1000, dur=500):
+    """Cross-platform beep: real beep on Windows, terminal bell elsewhere."""
+    if winsound is not None:
+        try:
+            winsound.Beep(freq, dur)
+            return
+        except Exception:
+            pass
+    try:
+        print("\a", end="", flush=True)
+    except Exception:
+        pass
 
 
 # ───────────────────────────────────────────────
@@ -104,7 +122,7 @@ def auto_click():
                 x, y = pyautogui.position()
                 pyautogui.click(x, y)
 
-                winsound.Beep(1000, 500)
+                _beep(1000, 500)
 
                 total_click_count += 1
                 hourly_click_count += 1

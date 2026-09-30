@@ -1,12 +1,28 @@
+#!/usr/bin/env python3
 import queue as _queue
 import threading
 import time
 import tkinter as tk
-import winsound
 from datetime import datetime, timedelta
 from tkinter import messagebox, ttk
 
+try:
+    import winsound
+except ImportError:  # non-Windows: no beep, clicks still work
+    winsound = None
+
 import pyautogui
+
+# Distinct sound per click type: (frequency Hz, duration ms)
+SOUNDS = {
+    "main": (1000, 300),
+    "fill": (750, 250),
+    "5-mark": (1500, 450),
+    "extra": (1250, 200),
+    "screen1": (900, 250),
+    "screen2": (1100, 250),
+    "second": (1000, 200),
+}
 
 PRIMARY = "#2563eb"
 SUCCESS = "#16a34a"
@@ -55,26 +71,57 @@ class ClickerEngine:
     def _log(self, msg):
         self._log_cb(msg)
 
+    def _beep(self, kind, cfg):
+        """Play a distinct sound per click type. Disabled via cfg['sound']=False."""
+        if not cfg.get("sound", True):
+            return
+        if winsound is not None:
+            try:
+                freq, dur = SOUNDS.get(kind, SOUNDS["main"])
+                winsound.Beep(freq, dur)
+                return
+            except Exception:
+                pass
+        # macOS / Linux fallback: terminal bell (no crash, clicks still work)
+        try:
+            print("\a", end="", flush=True)
+        except Exception:
+            pass
+
+    def _click_at(self, cfg):
+        """Click at the recorded position if one was set, else at the current mouse position."""
+        pos = cfg.get("pos")
+        if pos is None:
+            x, y = pyautogui.position()
+        else:
+            x, y = pos
+        pyautogui.click(x, y)
+        return (x, y)
+
     def _run(self, mode, cfg):
         try:
             if mode == 1:
-                self._mode_seconds(cfg)
+                self._mode_every_minute(cfg)
             elif mode == 2:
                 self._mode_every5(cfg)
-            else:
+            elif mode == 3:
                 self._mode_two_screens(cfg)
+            else:
+                self._mode_seconds(cfg)
         except Exception as exc:
             self._log(f"[ERROR] {exc}")
         finally:
             self._log("Engine stopped.")
 
 
-    # ---------- Mode 1: click at specific seconds every minute ----------
+    # ---------- Mode 4: click at specific seconds every minute ----------
     def _mode_seconds(self, cfg):
         seconds = sorted(set(cfg["seconds"]))
         total = hourly = 0
         last_hour = datetime.now().hour
-        self._log(f"Mode 1 started | will click at second(s): {seconds}")
+        last_next = ""
+        at = f"({cfg['pos'][0]},{cfg['pos'][1]})" if cfg.get("pos") else "mouse"
+        self._log(f"Mode 4 started | will click at second(s): {seconds} | at {at}")
         while not self._stop.is_set():
             now = datetime.now()
             h = now.hour
@@ -82,19 +129,31 @@ class ClickerEngine:
                 self._log(f"Hour changed {last_hour:02d} -> {h:02d} | clicks last hour: {hourly}")
                 last_hour = h
                 hourly = 0
+
+            # ----- report next upcoming click to the status bar -----
+            future = [s for s in seconds if now.replace(second=s, microsecond=0) > now]
+            if future:
+                t = now.replace(second=min(future), microsecond=0)
+            else:
+                t = (now + timedelta(minutes=1)).replace(second=min(seconds), microsecond=0)
+            sig = t.strftime("%H:%M:%S")
+            if sig != last_next:
+                last_next = sig
+                self._log(f"NEXT@{sig}")
+
             if now.second in seconds:
-                x, y = pyautogui.position()
-                pyautogui.click(x, y)
+                x, y = self._click_at(cfg)
+                self._beep("second", cfg)
                 total += 1
                 hourly += 1
-                self._log(f"Mouse #{total} clicked at ({x},{y}) | {now.strftime('%H:%M:%S')} | h:{hourly}")
+                self._log(f"Mouse #{total} clicked at ({x},{y}) | h:{hourly}")
                 if not self._sleep(1.1):
                     break
             time.sleep(0.05)
 
 
     # ---------- Mode 2: click every 5 min (+1 extra after 2.5 min) ----------
-    def _schedule_next_click(self, now, click_second):
+    def _schedule_next_click(self, now, click_second, label="Next click"):
         minute = now.minute
         hour = now.hour
         divisible_minute = minute + (5 - minute % 5)
@@ -110,7 +169,7 @@ class ClickerEngine:
         nxt = now.replace(hour=hour, minute=click_minute, second=click_second, microsecond=0)
         if nxt <= now:
             nxt += timedelta(minutes=5)
-        self._log(f"Next click -> {nxt.strftime('%H:%M:%S')}")
+        self._log(f"{label} -> {nxt.strftime('%H:%M:%S')}")
         return nxt
 
     def _mode_every5(self, cfg):
@@ -118,8 +177,10 @@ class ClickerEngine:
         total = hourly = 0
         last_hour = datetime.now().hour
         last_click_time = None
+        last_next = ""
         next_click_at = self._schedule_next_click(datetime.now(), click_second)
-        self._log(f"Mode 2 started | click at second {click_second:02d} every 5 min + extra after 2.5 min")
+        at = f"({cfg['pos'][0]},{cfg['pos'][1]})" if cfg.get("pos") else "mouse"
+        self._log(f"Mode 2 started | click at second {click_second:02d} every 5 min + extra after 2.5 min | at {at}")
         while not self._stop.is_set():
             now = datetime.now()
             h = now.hour
@@ -128,24 +189,35 @@ class ClickerEngine:
                 last_hour = h
                 hourly = 0
 
+            # ----- report next upcoming click (main or extra) to the status bar -----
+            cand = next_click_at if next_click_at > now else None
+            if last_click_time is not None:
+                extra_at = last_click_time + timedelta(minutes=2, seconds=30)
+                if extra_at > now and (cand is None or extra_at < cand):
+                    cand = extra_at
+            if cand is not None:
+                sig = cand.strftime("%H:%M:%S")
+                if sig != last_next:
+                    last_next = sig
+                    self._log(f"NEXT@{sig}")
+
             if now >= next_click_at:
-                x, y = pyautogui.position()
-                pyautogui.click(x, y)
-                winsound.Beep(1000, 300)
+                x, y = self._click_at(cfg)
+                self._beep("main", cfg)
                 total += 1
                 hourly += 1
                 last_click_time = now
-                self._log(f"[Main] #{total} clicked at ({x},{y}) | {now.strftime('%H:%M:%S')}")
+                self._log(f"[main] #{total} clicked at ({x},{y})")
                 next_click_at = self._schedule_next_click(now, click_second)
                 if not self._sleep(1.2):
                     break
 
             if last_click_time is not None and (now - last_click_time).seconds >= 150:
-                x, y = pyautogui.position()
-                pyautogui.click(x, y)
+                x, y = self._click_at(cfg)
+                self._beep("extra", cfg)
                 total += 1
                 hourly += 1
-                self._log(f"[Extra] #{total} clicked at ({x},{y}) | {now.strftime('%H:%M:%S')} (2.5 min later)")
+                self._log(f"[extra] #{total} clicked at ({x},{y}) (2.5 min later)")
                 last_click_time = None
                 if not self._sleep(1.2):
                     break
@@ -159,19 +231,115 @@ class ClickerEngine:
         click_second = cfg["second"]
         total = 0
         last_click_minute = -1
+        last_next = ""
         self._log(f"Mode 3 started | screen 1 = {pos1} | screen 2 = {pos2} | second: {click_second:02d}")
         while not self._stop.is_set():
             now = datetime.now()
             minute = now.minute
             second = now.second
 
+            # ----- report next upcoming click to the status bar -----
+            t = now.replace(second=click_second, microsecond=0)
+            if t <= now:
+                t += timedelta(minutes=1)
+            sig = t.strftime("%H:%M:%S")
+            if sig != last_next:
+                last_next = sig
+                self._log(f"NEXT@{sig}")
+
             if second == click_second and last_click_minute != minute:
                 is_odd = minute % 2 == 1
                 pos = pos1 if is_odd else pos2
                 pyautogui.click(pos)
+                self._beep("screen1" if is_odd else "screen2", cfg)
                 total += 1
                 last_click_minute = minute
-                self._log(f"Screen {'1' if is_odd else '2'} clicked #{total} at {pos} | {now.strftime('%H:%M:%S')}")
+                self._log(f"Screen {'1' if is_odd else '2'} clicked #{total} at {pos}")
+                if not self._sleep(1.1):
+                    break
+
+            time.sleep(0.05)
+
+
+    # ---------- Mode 1: every-minute main + fill, but 5-mark minutes use Mode-2 click only ----------
+    def _mode_every_minute(self, cfg):
+        every_second = cfg["second"]
+        fill_second = cfg["fill_second"]
+        div5_second = cfg["div5_second"]
+        total = hourly = 0
+        last_hour = datetime.now().hour
+        next_mark = self._schedule_next_click(datetime.now(), div5_second, "Next 5-mark")
+        last_fired_mark_hm = (-1, -1)
+        last_normal_hm = (-1, -1)
+        main_done = fill_done = False
+        last_next = ""
+        at = f"({cfg['pos'][0]},{cfg['pos'][1]})" if cfg.get("pos") else "mouse"
+        self._log(f"Mode 1 started | main @ :{every_second:02d} + fill @ :{fill_second:02d} every minute | "
+                  f"5-mark @ :{div5_second:02d} | at {at}")
+        while not self._stop.is_set():
+            now = datetime.now()
+            h = now.hour
+            if h != last_hour:
+                self._log(f"Hour changed {last_hour:02d} -> {h:02d} | clicks last hour: {hourly}")
+                last_hour = h
+                hourly = 0
+
+            now_hm = (now.hour, now.minute)
+
+            # ----- report next upcoming click to the status bar -----
+            cand = None
+            for s in (every_second, fill_second):
+                t = now.replace(second=s, microsecond=0)
+                if t > now and (cand is None or t < cand):
+                    cand = t
+            if next_mark > now and (cand is None or next_mark < cand):
+                cand = next_mark
+            if cand is not None:
+                sig = cand.strftime("%H:%M:%S")
+                if sig != last_next:
+                    last_next = sig
+                    self._log(f"NEXT@{sig}")
+
+            # ----- 5-mark click (Mode-2 schedule, no extra) -----
+            if now >= next_mark:
+                x, y = self._click_at(cfg)
+                self._beep("5-mark", cfg)
+                total += 1
+                hourly += 1
+                last_fired_mark_hm = (next_mark.hour, next_mark.minute)
+                self._log(f"[5-mark] #{total} clicked at ({x},{y})")
+                next_mark = self._schedule_next_click(now, div5_second, "Next 5-mark")
+                if not self._sleep(1.2):
+                    break
+                continue
+
+            # ----- normal minutes do main + fill; 5-mark minutes are skipped entirely -----
+            mark_hm = (next_mark.hour, next_mark.minute)
+            if now_hm == mark_hm or now_hm == last_fired_mark_hm:
+                time.sleep(0.05)
+                continue
+
+            if now_hm != last_normal_hm:
+                last_normal_hm = now_hm
+                main_done = fill_done = False
+
+            second = now.second
+            if second == every_second and not main_done:
+                x, y = self._click_at(cfg)
+                self._beep("main", cfg)
+                total += 1
+                hourly += 1
+                main_done = True
+                self._log(f"[main] #{total} clicked at ({x},{y})")
+                if not self._sleep(1.1):
+                    break
+            elif second == fill_second and not fill_done:
+                x, y = self._click_at(cfg)
+                self._beep("fill", cfg)
+                total += 1
+                hourly += 1
+                fill_done = True
+                self._log(f"[fill] #{total} clicked at ({x},{y})")
                 if not self._sleep(1.1):
                     break
 
@@ -251,11 +419,15 @@ class AutoClickerApp:
         self.msg_q = _queue.Queue()
         self.pos1 = None
         self.pos2 = None
+        self.click_pos = None
+        self._click_pos_labels = []
+        self._click_pos_btns = []
         self._running_flag = False
         self._err_job = None
+        self.sound_var = tk.BooleanVar(value=True)
 
         self._build_ui()
-        self._center_window(640, 640)
+        self._center_window(660, 700)
         root.after(100, self._poll_queue)
         root.after(250, self._tick_clock)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -267,22 +439,23 @@ class AutoClickerApp:
         self.root.minsize(560, 540)
 
     def _build_ui(self):
-        header = tk.Frame(self.root, bg=PRIMARY, height=54)
+        header = tk.Frame(self.root, bg=PRIMARY, height=92)
         header.pack(fill="x")
         header.pack_propagate(False)
         tk.Label(header, text="Auto Clicker", bg=PRIMARY, fg="white",
-                 font=("Segoe UI", 17, "bold")).pack(side="left", padx=16, pady=10)
-        self.clock_lbl = tk.Label(header, text="--:--:--", bg=PRIMARY, fg="#dbeafe",
-                                  font=("Consolas", 12, "bold"))
+                 font=("Segoe UI", 22, "bold")).pack(side="left", padx=16, pady=16)
+        self.clock_lbl = tk.Label(header, text="--:--:--", bg=PRIMARY, fg="#ffffff",
+                                   font=("Consolas", 30, "bold"))
         self.clock_lbl.pack(side="right", padx=16)
 
         self.mode_card = ttk.LabelFrame(self.root, text="  Select Mode  ", style="Card.TLabelframe", padding=12)
         self.mode_card.pack(fill="x", padx=14, pady=(12, 6))
         self.mode_var = tk.StringVar(value="1")
         mode_opts = [
-            ("1", "Mode 1  -  Click at specific seconds (every minute)"),
+            ("1", "Mode 1  -  Every minute main + fill, 5-min marks Mode-2 style"),
             ("2", "Mode 2  -  Click every 5 min + extra click after 2.5 min"),
             ("3", "Mode 3  -  Alternate between two screens (odd/even minute)"),
+            ("4", "Mode 4  -  Click at specific seconds (every minute)"),
         ]
         for value, label in mode_opts:
             ttk.Radiobutton(self.mode_card, text=label, variable=self.mode_var, value=value,
@@ -291,17 +464,6 @@ class AutoClickerApp:
         self.settings_frame = ttk.LabelFrame(self.root, text="  Settings  ", style="Card.TLabelframe", padding=12)
         self.settings_frame.pack(fill="x", padx=14, pady=6)
 
-        self.m1 = ttk.Frame(self.settings_frame, style="Card.TFrame")
-        self.m1_row = ttk.Frame(self.m1, style="Card.TFrame")
-        self.m1_row.pack(anchor="w", pady=4)
-        ttk.Label(self.m1_row, text="Seconds to click (comma separated):", style="Card.TLabel").pack(side="left")
-        self.m1_entry = ttk.Entry(self.m1_row, width=12)
-        self.m1_entry.insert(0, "0,30")
-        self.m1_entry.pack(side="left", padx=(8, 0))
-        ttk.Label(self.m1, text="Clicks at the current mouse position whenever the seconds match.",
-                  style="Hint.TLabel", wraplength=520).pack(anchor="w")
-        ToolTip(self.m1_entry, "Example: 0,30 clicks at :00 and :30 of every minute.")
-
         self.m2 = ttk.Frame(self.settings_frame, style="Card.TFrame")
         self.m2_row = ttk.Frame(self.m2, style="Card.TFrame")
         self.m2_row.pack(anchor="w", pady=4)
@@ -309,9 +471,11 @@ class AutoClickerApp:
         self.m2_entry = ttk.Entry(self.m2_row, width=6)
         self.m2_entry.insert(0, "30")
         self.m2_entry.pack(side="left", padx=(8, 0))
-        ttk.Label(self.m2, text="Main click at the next minute divisible by 5, plus an extra click 2.5 min later.",
+        ttk.Label(self.m2, text="Main click at the next minute divisible by 5, plus an extra click 2.5 min later. "
+                  "Clicks at the recorded position (or current mouse position).",
                   style="Hint.TLabel", wraplength=520).pack(anchor="w")
         ToolTip(self.m2_entry, "Main click lands one minute before each 5-minute mark, at this second.")
+        self._make_click_pos_row(self.m2)
 
         self.m3 = ttk.Frame(self.settings_frame, style="Card.TFrame")
         self.m3_row = ttk.Frame(self.m3, style="Card.TFrame")
@@ -337,6 +501,44 @@ class AutoClickerApp:
         ToolTip(self.rec1_btn, "Move the mouse to screen 1, then click. Position is captured after a 5s countdown.")
         ToolTip(self.rec2_btn, "Move the mouse to screen 2, then click. Position is captured after a 5s countdown.")
 
+        self.m4 = ttk.Frame(self.settings_frame, style="Card.TFrame")
+        self.m4_row = ttk.Frame(self.m4, style="Card.TFrame")
+        self.m4_row.pack(anchor="w", pady=4)
+        ttk.Label(self.m4_row, text="Seconds to click (comma separated):", style="Card.TLabel").pack(side="left")
+        self.m4_entry = ttk.Entry(self.m4_row, width=12)
+        self.m4_entry.insert(0, "0,30")
+        self.m4_entry.pack(side="left", padx=(8, 0))
+        ttk.Label(self.m4, text="Clicks at the recorded position (or current mouse position) whenever the seconds match.",
+                  style="Hint.TLabel", wraplength=520).pack(anchor="w")
+        ToolTip(self.m4_entry, "Example: 0,30 clicks at :00 and :30 of every minute.")
+        self._make_click_pos_row(self.m4)
+
+        self.m1 = ttk.Frame(self.settings_frame, style="Card.TFrame")
+        self.m1_row1 = ttk.Frame(self.m1, style="Card.TFrame")
+        self.m1_row1.pack(anchor="w", pady=4)
+        ttk.Label(self.m1_row1, text="Every-minute second (0-59):", style="Card.TLabel").pack(side="left")
+        self.m1_entry = ttk.Entry(self.m1_row1, width=6)
+        self.m1_entry.insert(0, "58")
+        self.m1_entry.pack(side="left", padx=(8, 0))
+        ttk.Label(self.m1_row1, text="   Fill second (0-59):", style="Card.TLabel").pack(side="left")
+        self.m1_fill_entry = ttk.Entry(self.m1_row1, width=6)
+        self.m1_fill_entry.insert(0, "30")
+        self.m1_fill_entry.pack(side="left", padx=(8, 0))
+        self.m1_row2 = ttk.Frame(self.m1, style="Card.TFrame")
+        self.m1_row2.pack(anchor="w", pady=4)
+        ttk.Label(self.m1_row2, text="5-mark second (0-59):", style="Card.TLabel").pack(side="left")
+        self.m1_div5_entry = ttk.Entry(self.m1_row2, width=6)
+        self.m1_div5_entry.insert(0, "55")
+        self.m1_div5_entry.pack(side="left", padx=(8, 0))
+        ttk.Label(self.m1, text="Each normal minute: one click at each second (order follows the clock, e.g. :30 then :58). "
+                  "On 5-mark minutes: only the 5-mark click (no main, no fill). "
+                  "Clicks at the recorded position, or the mouse if none recorded.",
+                  style="Hint.TLabel", wraplength=520).pack(anchor="w")
+        self._make_click_pos_row(self.m1)
+        ToolTip(self.m1_entry, "First click every normal minute at this second (e.g. 58 -> :58).")
+        ToolTip(self.m1_fill_entry, "Second click every normal minute at this second (e.g. 30 -> :30). Must differ from the first.")
+        ToolTip(self.m1_div5_entry, "5-minute marks use Mode-2 scheduling at this second (e.g. 55 -> 04:55, 09:55...).")
+
         self.err_lbl = ttk.Label(self.settings_frame, text="", style="Err.TLabel")
         self._switch_mode()
 
@@ -347,9 +549,12 @@ class AutoClickerApp:
         self.start_btn = ttk.Button(btn_container, text="\u25B6  Start", style="Accent.TButton", command=self._start)
         self.start_btn.pack(side="left", padx=(0, 10))
         self.stop_btn = ttk.Button(btn_container, text="\u23F9  Stop", style="Danger.TButton", command=self._stop)
-        self.stop_btn.pack(side="left")
+        self.stop_btn.pack(side="left", padx=(0, 10))
+        self.sound_check = ttk.Checkbutton(btn_container, text="\U0001F514 Sound", variable=self.sound_var)
+        self.sound_check.pack(side="left")
         ToolTip(self.start_btn, "Start the auto clicker with the current settings.")
         ToolTip(self.stop_btn, "Stop the auto clicker immediately.")
+        ToolTip(self.sound_check, "Distinct beep per click: main=1000Hz, fill=750Hz, 5-mark=1500Hz, extra=1250Hz.")
 
         self.status_bar = tk.Frame(self.root, bg=BG)
         self.status_bar.pack(fill="x", padx=14)
@@ -358,6 +563,8 @@ class AutoClickerApp:
         self.status_dot.pack(side="left")
         self.status_lbl = ttk.Label(self.status_bar, text="Idle", style="Status.TLabel")
         self.status_lbl.pack(side="left", padx=(6, 0))
+        self.next_lbl = ttk.Label(self.status_bar, text="Next click: --", style="Status.TLabel")
+        self.next_lbl.pack(side="left", padx=(14, 0))
         self._set_status("Idle", "#9ca3af")
 
         log_card = tk.Frame(self.root, bg=CARD, highlightthickness=1, highlightbackground=BORDER)
@@ -377,18 +584,29 @@ class AutoClickerApp:
         self.log_text.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
         self.log_text.pack(side="left", fill="both", expand=True)
+        self.log_text.tag_configure("ts", foreground="#94a3b8")
+        self.log_text.tag_configure("info", foreground=TEXT)
+        self.log_text.tag_configure("main", foreground="#16a34a")
+        self.log_text.tag_configure("fill", foreground="#2563eb")
+        self.log_text.tag_configure("mark", foreground="#9333ea")
+        self.log_text.tag_configure("extra", foreground="#0891b2")
+        self.log_text.tag_configure("sched", foreground="#4f46e5")
+        self.log_text.tag_configure("hour", foreground=MUTED)
+        self.log_text.tag_configure("error", foreground=ERROR, font=("Consolas", 9, "bold"))
 
     def _switch_mode(self):
         mode = int(self.mode_var.get())
-        for f in (self.m1, self.m2, self.m3):
+        for f in (self.m1, self.m2, self.m3, self.m4):
             f.pack_forget()
         self.err_lbl.pack_forget()
         if mode == 1:
             self.m1.pack(anchor="w")
         elif mode == 2:
             self.m2.pack(anchor="w")
-        else:
+        elif mode == 3:
             self.m3.pack(anchor="w")
+        else:
+            self.m4.pack(anchor="w")
 
     def _show_error(self, msg):
         self.err_lbl.config(text=f"\u26A0  {msg}")
@@ -417,6 +635,41 @@ class AutoClickerApp:
                 self.log(f"Position {n} recorded at ({x},{y})")
 
         btn.config(text="Move the mouse now (5s)...")
+        countdown(5)
+
+    def _make_click_pos_row(self, parent):
+        """Shared 'Record Click Position' row used by modes 1, 2 and 4."""
+        row = ttk.Frame(parent, style="Card.TFrame")
+        row.pack(anchor="w", pady=4)
+        ttk.Label(row, text="Click position:", style="Card.TLabel").pack(side="left")
+        btn = ttk.Button(row, text="Record Click Position", style="Ghost.TButton",
+                         command=self._record_click_pos)
+        btn.pack(side="left", padx=(8, 0))
+        lbl = ttk.Label(row, text="Not recorded (uses mouse)", style="Card.TLabel", foreground=MUTED)
+        lbl.pack(side="left", padx=6)
+        ToolTip(btn, "Move the mouse to the click spot. Position is captured after a 5s countdown. "
+                     "If nothing is recorded, clicks happen at the current mouse position.")
+        self._click_pos_btns.append(btn)
+        self._click_pos_labels.append(lbl)
+
+    def _record_click_pos(self):
+        for b in self._click_pos_btns:
+            b.config(state="disabled", text="Move the mouse now (5s)...")
+
+        def countdown(secs):
+            if secs > 0:
+                for b in self._click_pos_btns:
+                    b.config(text=f"Move the mouse to the position... {secs}")
+                self.root.after(1000, lambda: countdown(secs - 1))
+            else:
+                x, y = pyautogui.position()
+                self.click_pos = (x, y)
+                for b in self._click_pos_btns:
+                    b.config(state="normal", text="Re-record Click Position")
+                for lbl in self._click_pos_labels:
+                    lbl.config(text=f"{x},{y}", foreground=SUCCESS)
+                self.log(f"Click position recorded at ({x},{y})")
+
         countdown(5)
 
     def _set_status(self, text, color):
@@ -448,10 +701,22 @@ class AutoClickerApp:
         if self.engine.is_running():
             return
         mode = int(self.mode_var.get())
-        cfg = {}
+        cfg = {"sound": bool(self.sound_var.get())}
         try:
             if mode == 1:
-                parts = [s.strip() for s in self.m1_entry.get().split(",")]
+                every = self._parse_int(self.m1_entry.get(), "Every-minute second", 0, 59)
+                fill = self._parse_int(self.m1_fill_entry.get(), "Fill second", 0, 59)
+                if fill == every:
+                    raise ValueError("Fill second must be different from Every-minute second.")
+                cfg["second"] = every
+                cfg["fill_second"] = fill
+                cfg["div5_second"] = self._parse_int(self.m1_div5_entry.get(), "5-mark second", 0, 59)
+                cfg["pos"] = self.click_pos
+            elif mode == 2:
+                cfg["click_second"] = self._parse_int(self.m2_entry.get(), "Click second", 0, 59)
+                cfg["pos"] = self.click_pos
+            elif mode == 4:
+                parts = [s.strip() for s in self.m4_entry.get().split(",")]
                 vals = []
                 for p in parts:
                     if p == "":
@@ -464,10 +729,8 @@ class AutoClickerApp:
                 for v in vals:
                     if not (0 <= v <= 59):
                         raise ValueError("Seconds must be between 0 and 59.")
-                seconds = sorted(set(vals))
-                cfg["seconds"] = seconds
-            elif mode == 2:
-                cfg["click_second"] = self._parse_int(self.m2_entry.get(), "Click second", 0, 59)
+                cfg["seconds"] = sorted(set(vals))
+                cfg["pos"] = self.click_pos
             else:
                 if self.pos1 is None or self.pos2 is None:
                     raise ValueError("Record both screen positions first.")
@@ -482,8 +745,9 @@ class AutoClickerApp:
         self.engine.start(mode, cfg)
         self._running_flag = True
         self._set_status("Running", SUCCESS)
-        mode_names = {1: "Seconds", 2: "Every 5 min", 3: "Two screens"}
+        mode_names = {1: "Every min + fill + 5-mark", 2: "Every 5 min", 3: "Two screens", 4: "Seconds"}
         self.log(f"Started: Mode {mode} ({mode_names[mode]})")
+        self.next_lbl.config(text="Next click: --")
         self._set_controls_enabled(False)
 
     def _stop(self):
@@ -491,6 +755,7 @@ class AutoClickerApp:
         self.engine.stop()
         self._running_flag = False
         self._set_status("Idle", "#9ca3af")
+        self.next_lbl.config(text="Next click: --")
         self._set_controls_enabled(True)
         if was_running:
             self.log("Stopped by user.")
@@ -499,8 +764,10 @@ class AutoClickerApp:
         state = "normal" if enabled else "disabled"
         for child in self.mode_card.winfo_children():
             child.config(state=state)
-        for w in (self.m1_entry, self.m2_entry, self.m3_second_entry):
+        for w in (self.m1_entry, self.m1_fill_entry, self.m1_div5_entry, self.m2_entry, self.m3_second_entry, self.m4_entry):
             w.config(state=state)
+        for b in self._click_pos_btns:
+            b.config(state=state)
         if self.pos1 is not None:
             self.rec1_btn.config(state=state)
         else:
@@ -510,24 +777,56 @@ class AutoClickerApp:
         else:
             self.rec2_btn.config(state="normal" if enabled else "disabled")
         self.start_btn.config(state="disabled" if not enabled else "normal")
+        self.sound_check.config(state=state)
 
     def log(self, msg):
         self.msg_q.put(msg)
+
+    @staticmethod
+    def _log_tag(msg):
+        low = msg.lower()
+        if "[error]" in low:
+            return "error"
+        if low.startswith("next "):
+            return "sched"
+        if "[5-mark]" in low:
+            return "mark"
+        if "[fill]" in low:
+            return "fill"
+        if "[extra]" in low:
+            return "extra"
+        if "[main]" in low or low.startswith("mouse #"):
+            return "main"
+        if low.startswith("screen") and "clicked" in low:
+            return "main"
+        if "hour changed" in low:
+            return "hour"
+        return "info"
+
+    def _write_log(self, msg):
+        ts = datetime.now().strftime("%H:%M:%S")
+        tag = self._log_tag(msg)
+        self.log_text.config(state="normal")
+        self.log_text.insert("end", f"[{ts}] ", "ts")
+        self.log_text.insert("end", msg + "\n", tag)
+        self.log_text.see("end")
+        self.log_text.config(state="disabled")
 
     def _poll_queue(self):
         try:
             while True:
                 msg = self.msg_q.get_nowait()
-                self.log_text.config(state="normal")
-                self.log_text.insert("end", msg + "\n")
-                self.log_text.see("end")
-                self.log_text.config(state="disabled")
+                if msg.startswith("NEXT@"):
+                    self.next_lbl.config(text=f"Next click: {msg[5:]}")
+                else:
+                    self._write_log(msg)
         except _queue.Empty:
             pass
 
         if self._running_flag and not self.engine.is_running():
             self._running_flag = False
             self._set_status("Idle", "#9ca3af")
+            self.next_lbl.config(text="Next click: --")
             self._set_controls_enabled(True)
 
         self.root.after(100, self._poll_queue)

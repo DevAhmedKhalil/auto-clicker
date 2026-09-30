@@ -1,56 +1,75 @@
 # Auto-Clicker
 
-This is a simple auto-clicker script written in Python using the `pyautogui` module. The script automatically clicks the current mouse cursor position at the first second of each minute and at the 30th second of each minute.
+Cross-platform (Windows / macOS / Linux) auto-clicker with a Tkinter GUI.
 
-## Features
+Main app: `auto_clicker_gui.py` — 4 modes:
 
-- Automatically clicks the current mouse cursor position.
-- Clicks at the first second of each minute and at the 30th second of each minute.
-- Uses Cairo timezone (Africa/Cairo).
-- Can be stopped with `Ctrl-C`.
+- **Mode 1** — every-minute click + fill click, 5-minute marks use a special click
+- **Mode 2** — click every 5 min + one extra click 2.5 min later
+- **Mode 3** — alternate between two recorded screen positions (odd/even minute)
+- **Mode 4** — click at specific seconds of every minute (e.g. `0,30`)
+
+Each click type has its own beep sound (Windows), terminal bell elsewhere.
+Sounds can be toggled with the 🔔 Sound checkbox.
+
+Legacy console scripts (`autoClicker.py`, `clickerAtDivBy5.py`,
+`twoScreensAutoClicker.py`) also work on all three OSes.
 
 ## Requirements
 
-- Python 3.x
-- `pyautogui` library
-- `pytz` library
+- Python 3.10+
+- Dependencies in `requirements.txt` (`pyautogui`, `pytz`)
 
-## Installation
+```sh
+pip install -r requirements.txt
+```
 
-1. **Clone the repository:**
-    ```sh
-    git clone https://github.com/DevAhmedKhalil/auto-click-pyautogui.git
-    cd auto-click-pyautogui
-    ```
+OS extras:
 
-2. **Create a virtual environment (optional but recommended):**
-    ```sh
-    # Linux
-    python3 -m venv venv
-    source venv/bin/activate
-    ```
-    ```sh
-    # Windows
-    python -m venv venv
-    venv\Scripts\activate
-    ```
+- **Windows** — nothing extra. Double-click `Run-AutoClicker.bat`
+  (uses `dist\AutoClicker.exe` if present, else the venv, else system Python).
+- **macOS** — grant permission once for the terminal/app that runs it:
+  *System Settings → Privacy & Security → Accessibility* (mouse control)
+  and *Screen Recording* (some `pyautogui` features). Then:
+  ```sh
+  chmod +x run-autoclicker.sh
+  ./run-autoclicker.sh
+  ```
+- **Linux (Debian/Ubuntu)** — Tkinter + screenshot backend first:
+  ```sh
+  sudo apt install python3-tk python3-dev scrot
+  pip install -r requirements.txt
+  chmod +x run-autoclicker.sh
+  ./run-autoclicker.sh
+  ```
+  On Wayland, `pyautogui` mouse control may need an X11 session.
 
-3. **Install the required dependencies:**
-    ```sh
-    pip install pyautogui pytz
-    ```
+## Run from source (any OS)
 
-## Usage
+```sh
+python auto_clicker_gui.py
+```
 
-1. **Run the script:**
-    ```sh
-    python autoClicker.py
-    ```
+## Standalone build (optional)
 
-2. **The auto-clicker will start clicking the current mouse cursor position at the first second of each minute and at the 30th second of each minute.**
+PyInstaller binaries are **OS-specific**: a Windows `.exe` will NOT run on
+macOS/Linux. Build on each machine separately:
 
-3. **To stop the auto-clicker, press `Ctrl-C` in the terminal.**
+```sh
+pip install pyinstaller
+python -m PyInstaller --noconfirm --clean AutoClicker.spec
+```
 
-## Contributing
+Output lands in `dist/` (`AutoClicker.exe` on Windows,
+`AutoClicker` / `AutoClicker.app` on macOS/Linux).
 
-Feel free to open issues or submit pull requests if you have any improvements or bug fixes.
+## Moving to another machine (Mac / Linux)
+
+Copy only the source — skip the heavy/OS-specific stuff:
+
+- ✅ copy: `*.py`, `*.spec`, `*.sh`, `*.bat`, `requirements.txt`,
+  `.gitattributes`, `README.md`
+- ❌ skip: `venv/`, `dist/`, `build/`, `__pycache__/`
+
+Then on the new machine: install Python 3, `pip install -r requirements.txt`,
+and run (`./run-autoclicker.sh` or `python3 auto_clicker_gui.py`).

@@ -266,6 +266,8 @@ class ClickerEngine:
         every_second = cfg["second"]
         fill_second = cfg["fill_second"]
         div5_second = cfg["div5_second"]
+        start_with_mark = cfg.get("start_with_mark", True)
+        waiting_first_mark = start_with_mark
         total = hourly = 0
         last_hour = datetime.now().hour
         next_mark = self._schedule_next_click(datetime.now(), div5_second, "Next 5-mark")
@@ -276,6 +278,8 @@ class ClickerEngine:
         at = f"({cfg['pos'][0]},{cfg['pos'][1]})" if cfg.get("pos") else "mouse"
         self._log(f"Mode 1 started | main @ :{every_second:02d} + fill @ :{fill_second:02d} every minute | "
                   f"5-mark @ :{div5_second:02d} | at {at}")
+        if waiting_first_mark:
+            self._log("Waiting for first 5-mark before main+fill.")
         while not self._stop.is_set():
             now = datetime.now()
             h = now.hour
@@ -288,10 +292,11 @@ class ClickerEngine:
 
             # ----- report next upcoming click to the status bar -----
             cand = None
-            for s in (every_second, fill_second):
-                t = now.replace(second=s, microsecond=0)
-                if t > now and (cand is None or t < cand):
-                    cand = t
+            if not waiting_first_mark:
+                for s in (every_second, fill_second):
+                    t = now.replace(second=s, microsecond=0)
+                    if t > now and (cand is None or t < cand):
+                        cand = t
             if next_mark > now and (cand is None or next_mark < cand):
                 cand = next_mark
             if cand is not None:
@@ -309,8 +314,16 @@ class ClickerEngine:
                 last_fired_mark_hm = (next_mark.hour, next_mark.minute)
                 self._log(f"[5-mark] #{total} clicked at ({x},{y})")
                 next_mark = self._schedule_next_click(now, div5_second, "Next 5-mark")
+                if waiting_first_mark:
+                    waiting_first_mark = False
+                    self._log("First 5-mark done, main+fill enabled.")
                 if not self._sleep(1.2):
                     break
+                continue
+
+            # ----- before the first 5-mark: no main, no fill -----
+            if waiting_first_mark:
+                time.sleep(0.05)
                 continue
 
             # ----- normal minutes do main + fill; 5-mark minutes are skipped entirely -----
@@ -530,14 +543,19 @@ class AutoClickerApp:
         self.m1_div5_entry = ttk.Entry(self.m1_row2, width=6)
         self.m1_div5_entry.insert(0, "55")
         self.m1_div5_entry.pack(side="left", padx=(8, 0))
+        self.mark_first_var = tk.BooleanVar(value=True)
+        self.mark_first_check = ttk.Checkbutton(self.m1, text="Start with 5-mark first", variable=self.mark_first_var)
+        self.mark_first_check.pack(anchor="w", pady=(2, 0))
         ttk.Label(self.m1, text="Each normal minute: one click at each second (order follows the clock, e.g. :30 then :58). "
                   "On 5-mark minutes: only the 5-mark click (no main, no fill). "
+                  "Starts by waiting for the first 5-mark (uncheck to start with main+fill immediately). "
                   "Clicks at the recorded position, or the mouse if none recorded.",
                   style="Hint.TLabel", wraplength=520).pack(anchor="w")
         self._make_click_pos_row(self.m1)
         ToolTip(self.m1_entry, "First click every normal minute at this second (e.g. 58 -> :58).")
         ToolTip(self.m1_fill_entry, "Second click every normal minute at this second (e.g. 30 -> :30). Must differ from the first.")
         ToolTip(self.m1_div5_entry, "5-minute marks use Mode-2 scheduling at this second (e.g. 55 -> 04:55, 09:55...).")
+        ToolTip(self.mark_first_check, "When checked, Mode 1 waits for the first 5-mark click before any main/fill click.")
 
         self.err_lbl = ttk.Label(self.settings_frame, text="", style="Err.TLabel")
         self._switch_mode()
@@ -712,6 +730,7 @@ class AutoClickerApp:
                 cfg["fill_second"] = fill
                 cfg["div5_second"] = self._parse_int(self.m1_div5_entry.get(), "5-mark second", 0, 59)
                 cfg["pos"] = self.click_pos
+                cfg["start_with_mark"] = bool(self.mark_first_var.get())
             elif mode == 2:
                 cfg["click_second"] = self._parse_int(self.m2_entry.get(), "Click second", 0, 59)
                 cfg["pos"] = self.click_pos
@@ -778,6 +797,7 @@ class AutoClickerApp:
             self.rec2_btn.config(state="normal" if enabled else "disabled")
         self.start_btn.config(state="disabled" if not enabled else "normal")
         self.sound_check.config(state=state)
+        self.mark_first_check.config(state=state)
 
     def log(self, msg):
         self.msg_q.put(msg)
